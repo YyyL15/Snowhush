@@ -50,6 +50,7 @@ struct Sprite {
     float turnSpeed;
     float flipSpeed;
     float rain;
+    float knife;
 };
 
 struct SpriteOut {
@@ -85,6 +86,7 @@ struct SpriteOut {
     float rain;
     /// For a drop running down the glass, the share of it from its head back that is its smear over the exposure.
     float blur;
+    float knife;
 };
 
 constant float3 candle = float3(1.0, 0.62, 0.26);
@@ -342,6 +344,65 @@ static float4 leafAt(float2 p, float seed, float turn, float flip, float alpha, 
     return float4(color * a, a);
 }
 
+/// The coverage of a shape from its signed distance, smoothed over a pixel.
+static float shapeCover(float inside) {
+    float edge = max(fwidth(inside), 1e-4);
+    return smoothstep(-edge, edge, inside);
+}
+
+/// A rounded box's signed distance, positive inside: `half` its half extents, `r` its corners' radius.
+static float roundBox(float2 p, float2 half_, float r) {
+    float2 d = abs(p) - half_ + r;
+    return -(length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r);
+}
+
+/// One flat-coloured part of a cartoon dagger, outlined in ink: `inside` its signed distance, positive inside.
+static float4 inked(float inside, float3 fill, float width) {
+    float a = shapeCover(inside);
+    float edge = max(fwidth(inside), 1e-4);
+    float3 color = mix(float3(0.11, 0.12, 0.13), fill, smoothstep(width - edge, width + edge, inside));
+    return float4(color * a, a);
+}
+
+/// A cartoon dagger at one moment, `p` running across it from -0.5 to 0.5, its tip pointing `turn`: a round orange
+/// pommel, a brown grip wound with darker bands, a broad crossguard, and a long blade of two flat teal faces tapering to
+/// its point, every part outlined in ink. Premultiplied.
+static float4 knifeAt(float2 p, float seed, float turn, float alpha, float3 light, float warm) {
+    // Along the dagger from its pommel to its tip, and across it.
+    float2 q = float2(cos(turn) * p.x + sin(turn) * p.y, -sin(turn) * p.x + cos(turn) * p.y);
+    float x = q.x;
+    float y = q.y;
+    const float ink = 0.016;
+
+    float t = saturate((x + 0.2) / 0.7);
+    float halfWidth = 0.088 * pow(1.0 - t, 0.85);
+    float blade = min(halfWidth - abs(y), x + 0.21);
+    float face = smoothstep(-0.004, 0.004, y);
+    float3 steel = mix(float3(0.35, 0.71, 0.71), float3(0.63, 0.91, 0.87), face);
+    // An inked ridge runs down the middle between the two faces, thinning out before the point.
+    float ridgeWidth = 0.006 * (1.0 - smoothstep(0.7, 0.95, t));
+    float ridgeEdge = max(fwidth(y), 1e-4);
+    steel = mix(steel, float3(0.11, 0.12, 0.13), smoothstep(ridgeWidth + ridgeEdge, ridgeWidth - ridgeEdge, abs(y)) * step(0.0, ridgeWidth - 1e-4));
+    // The ink thins toward the point, or the point would be all ink.
+    float4 color = inked(blade, steel, min(ink, halfWidth * 0.3 + 0.002));
+
+    float g = saturate((x + 0.39) / 0.17);
+    float grip = min(min(0.038 + 0.01 * g - abs(y), x + 0.4), -0.21 - x);
+    float band = abs(fract(g * 3.0 + 0.5) - 0.5);
+    float3 wood = mix(float3(0.36, 0.21, 0.13), float3(0.6, 0.37, 0.22), smoothstep(0.14, 0.2, band));
+    color = over(inked(grip, wood, ink * 0.8), color);
+
+    float guard = roundBox(float2(x + 0.205, y), float2(0.034, 0.175), 0.026);
+    color = over(inked(guard, float3(0.97, 0.73, 0.4), ink), color);
+
+    float pommel = 0.066 - length(float2(x + 0.43, y));
+    color = over(inked(pommel, float3(0.99, 0.69, 0.2), ink), color);
+
+    // Night dims it without draining its colour; candlelight warms it.
+    color.rgb = mix(color.rgb * mix(float3(1.0), light, 0.6), candle * color.a, warm * 0.35);
+    return color * alpha;
+}
+
 static float flicker(float time, float seed) {
     return 0.86 + 0.08 * sin(time * 11.0 + seed * 2.1) + 0.06 * sin(time * 29.0 + 1.3 + seed * 4.3);
 }
@@ -384,6 +445,33 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
                               const device Sprite *sprites [[buffer(0)]],
                               constant Uniforms &u [[buffer(1)]]) {
     Sprite s = sprites[vid];
+    if (s.knife != 0.0) {
+        // A knife over a 1/160 s exposure, far shorter than a leaf's so its flat cartoon colours stay crisp: it smears along its
+        // flight and, knocked loose, round its spin.
+        SpriteOut out;
+        float exposure = 0.006;
+        float pixels = max(s.size * u.scale, 4.0);
+        float2 travel = s.velocity * exposure;
+        float extent = pixels + length(travel) * u.scale;
+        out.position = float4((s.position - travel * 0.5 + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
+        out.pointSize = extent;
+        out.reach = extent / pixels;
+        out.streak = travel / max(s.size, 0.001);
+        out.turnSmear = s.turnSpeed * exposure;
+        float motion = length(travel) * u.scale + abs(out.turnSmear) * pixels * 0.5;
+        // A moment every couple of pixels is enough at so short an exposure.
+        out.samples = clamp(ceil(motion / 2.5), 1.0, 5.0);
+        out.alpha = s.alpha;
+        out.light = u.light.rgb;
+        out.warm = candlelight(u, s.position);
+        out.turn = s.turn;
+        out.ground = s.ground;
+        out.knife = s.knife;
+        out.leaf = 0.0;
+        out.ghost = 0.0;
+        out.rain = 0.0;
+        return out;
+    }
     if (s.leaf != 0.0) {
         SpriteOut out;
         // About a 1/40 s exposure: at 30 frames a second a falling leaf smears most of the way to where the next
@@ -411,6 +499,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.flip = s.flip;
         out.ghost = 0.0;
         out.rain = 0.0;
+        out.knife = 0.0;
         return out;
     }
     if (s.rain > 4.5) {
@@ -433,6 +522,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.rain = s.rain;
         out.size = pixels;
         out.blur = 0.0;
+        out.knife = 0.0;
         return out;
     }
     if (s.rain != 0.0) {
@@ -478,6 +568,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.turn = s.turn;
         out.tint = float4(0.0, 0.0, 0.0, s.tintAmount);
         out.turnSmear = s.turnSpeed;
+        out.knife = 0.0;
         return out;
     }
     float pixels = s.size * u.scale;
@@ -517,6 +608,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
     }
     out.leaf = 0.0;
     out.rain = 0.0;
+    out.knife = 0.0;
     return out;
 }
 
@@ -758,6 +850,27 @@ fragment float4 spriteFragment(SpriteOut in [[stage_in]], float2 coord [[point_c
         float4 water = rainAt(in, p);
         if (water.a < 0.002) discard_fragment();
         return water;
+    }
+    if (in.knife != 0.0) {
+        // A dagger is a thin line through its square: most of it is well off the line at every moment of the
+        // exposure, and goes straight away.
+        float2 axis = float2(cos(in.turn), sin(in.turn));
+        float off = abs(dot(p * in.reach, float2(-axis.y, axis.x)));
+        if (off > 0.24 + length(in.streak) * 0.5 + abs(in.turnSmear) * 0.5) discard_fragment();
+        // The knife over the exposure, from where it was to where it is now, turning on the way.
+        int n = int(in.samples);
+        float4 sum = float4(0.0);
+        for (int k = 0; k < n; k++) {
+            float along = (float(k) + 0.5) / float(n) - 0.5;
+            float back = along - 0.5;
+            sum += knifeAt(p * in.reach - in.streak * along, in.knife, in.turn + in.turnSmear * back, in.alpha, in.light, in.warm);
+        }
+        sum /= float(n);
+        // Stuck in a window's edge, the part of it gone in doesn't show.
+        float worldY = u.viewSize.y - in.position.y / u.scale;
+        sum *= smoothstep(in.ground - 0.5 / u.scale, in.ground + 0.5 / u.scale, worldY);
+        if (sum.a < 0.002) discard_fragment();
+        return sum;
     }
     if (in.leaf != 0.0) {
         // The leaf over the exposure, from where it was to where it is now, turning and tumbling on the way.

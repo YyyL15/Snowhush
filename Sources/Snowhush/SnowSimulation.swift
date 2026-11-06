@@ -2,9 +2,9 @@ import CoreGraphics
 import Foundation
 import simd
 
-/// What falls: snow, autumn leaves, rain or cherry blossom petals.
+/// What falls: snow, autumn leaves, rain, cherry blossom petals or knives.
 enum Mode: Int {
-    case snow, autumn, rain, blossom
+    case snow, autumn, rain, blossom, knives
 }
 
 struct Sprite {
@@ -52,6 +52,9 @@ struct Sprite {
     /// Rain instead of snow: one for a raindrop or a splash in the air, two for a drop running down the glass, three for
     /// one hanging under an edge, four for spray on the glass, five for the film a running drop leaves behind.
     var rain: Float = 0
+    /// A knife instead of snow: its seed, which picks its handle; zero for snow. `turn` is which way its tip points,
+    /// `size` its length, and `ground` how far down it shows, for one stuck in a window's edge.
+    var knife: Float = 0
 }
 
 /// A Halloween sign a ghost holds up, or lets fall into the snow.
@@ -114,6 +117,33 @@ private struct Flake {
     /// A drop come off the glass: how big the water it carries is, to run on down whatever window it lands on; zero
     /// for rain from the sky.
     var water: Float = 0
+    /// A knife instead of a flake: its seed; zero for snow.
+    var knife: Float = 0
+    /// For a knife knocked loose, which way its tip points and how fast it turns end over end; a knife from the sky
+    /// flies tip first and does not spin.
+    var angle: Float = 0
+    var spin: Float = 0
+    /// A knife the cursor struck: it flies on the way it was hit, tip first along its arc, until it comes down.
+    var thrown = false
+}
+
+/// A knife come down in a window's top edge, the Dock or the bottom of the screen: stuck in tip first, quivering a
+/// moment, or lying flat where it landed handle first. It rides along with what it is stuck in until it fades, the
+/// window is shaken or closed, or the cursor knocks it loose.
+private struct StuckKnife {
+    let layer: SnowLayer
+    /// Where it went in, from the layer's base.
+    var x: Float
+    var rest: Float
+    /// Which way its tip points.
+    let angle: Float
+    let size: Float
+    let seed: Float
+    /// How far into the edge it went, as a share of its length; zero for one lying flat.
+    let bury: Float
+    var age: Float = 0
+    let life: Float
+    var fade: Float = 1
 }
 
 /// A droplet thrown up where a raindrop bursts on a window's edge or the bottom of the screen.
@@ -438,6 +468,17 @@ final class SnowSimulation {
     /// Rain crosses the screen in a second or so, where a flake takes half a minute: far fewer are in sight at once.
     private let rainShare: Float = 0.12
     private let rainGravity: Float = 900
+    /// Knives are big and fast: fewer than raindrops are in sight at once.
+    private let knifeShare: Float = 0.035
+    /// How far a knife from the sky slants, sideways for each point down.
+    private let knifeSlant: Float = 0.6
+    private let knifeGravity: Float = 1800
+    /// A window jerked harder than this, or shaken, throws off the knives stuck in it.
+    private let knifeJolt: Float = 9000
+    private let maxStuck = 400
+    private var stuck: [StuckKnife] = []
+    /// Which way the storm slants: always from the upper left down to the lower right.
+    private let knifeLean: Float = 1
     private let maxSplashes = 1500
     private var splashes: [Splash] = []
     /// The share of raindrops hitting a window's top edge that run on down its face.
@@ -568,6 +609,7 @@ final class SnowSimulation {
         didSet {
             guard mode != oldValue else { return }
             lying.removeAll()
+            stuck.removeAll()
             updateTarget()
             flakes = flakes.prefix(targetFlakes).map { makeFlake(y: $0.position.y) }
             restyled = true
@@ -578,6 +620,7 @@ final class SnowSimulation {
     var leafy: Bool { mode == .autumn || mode == .blossom }
     var blossom: Bool { mode == .blossom }
     var rain: Bool { mode == .rain }
+    var knives: Bool { mode == .knives }
     private var restyled = false
     /// The mode waiting for the gust to clear the screen, so one kind never turns into the other in sight.
     private var nextMode: Mode?
@@ -609,18 +652,18 @@ final class SnowSimulation {
     }
 
     var pileTop: Float { ground.top }
-    var hasSnow: Bool { !lying.isEmpty || layers.contains { $0.top > 0.5 } }
+    var hasSnow: Bool { !lying.isEmpty || !stuck.isEmpty || layers.contains { $0.top > 0.5 } }
     /// Nothing falls, lies, waits for its window or haunts, and nothing will until the snow is stirred.
     var isEmpty: Bool {
         snowfall == .off && !halloween && flakes.isEmpty && grains.isEmpty && motes.isEmpty && ghosts.isEmpty
             && fallingSigns.isEmpty && snowballs.isEmpty && gust == nil && dormant.isEmpty && parking.isEmpty && lying.isEmpty && nextMode == nil
-            && splashes.isEmpty && glassDrops.isEmpty && !wet
+            && splashes.isEmpty && glassDrops.isEmpty && !wet && stuck.isEmpty
             && !layers.contains { $0.top > 0 }
     }
     /// Running drops or beads on the glass, drawn from a field of their own.
     var hasGlassDrops: Bool { glassDrops.contains { !$0.hanging } }
     var spriteCount: Int {
-        lying.count + flakes.count + grains.count + motes.count + ghosts.count * 2 + snowballs.count + splashes.count + glassDrops.count
+        lying.count + stuck.count + flakes.count + grains.count + motes.count + ghosts.count * 2 + snowballs.count + splashes.count + glassDrops.count
             + ledgeList.reduce(0) { $0 + $1.spray.count + $1.film.count }
     }
     /// Floats the renderer needs per frame: each layer's surface and bed.
@@ -638,7 +681,7 @@ final class SnowSimulation {
     func step(dt: Float, cursor point: SIMD2<Float>) -> Bool {
         clock += Double(dt)
         let wasMoving = !flakes.isEmpty || !grains.isEmpty || !motes.isEmpty || !ghosts.isEmpty || !fallingSigns.isEmpty || !snowballs.isEmpty
-            || !splashes.isEmpty || !glassDrops.isEmpty || wet
+            || !splashes.isEmpty || !glassDrops.isEmpty || wet || !stuck.isEmpty
         heightsChanged = false
         leafBudget = nil
 
@@ -659,6 +702,7 @@ final class SnowSimulation {
         haunt(dt: dt)
         settle(dt: dt)
         tendLeaves(dt: dt)
+        tendKnives(dt: dt)
         if let next = nextMode, gust == nil, grains.isEmpty || clock - switchedAt > 6 {
             nextMode = nil
             mode = next
@@ -674,15 +718,18 @@ final class SnowSimulation {
         let pushed = clock - lastWindowMotion < 0.6 || clock - lastCursorPush < 0.3 || gust != nil || !snowballs.isEmpty || clock - hitAt < 0.6
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = grains.count > 24 || clock < scatteredUntil || abs(slideWind) > 20
-        if pushed {
+        // Knives cross the screen in a second or so, drawn crisp rather than smeared: at the calm rate they would
+        // hop. One struck or knocked loose flies its arc at the display's full rate.
+        let tossed = knives && flakes.contains { $0.thrown || $0.spin != 0 }
+        if pushed || tossed {
             pace = .interactive
-        } else if flying {
+        } else if flying || (knives && !flakes.isEmpty) {
             pace = .lively
         } else {
             pace = .calm
         }
         let changed = wasMoving || !flakes.isEmpty || !grains.isEmpty || !motes.isEmpty || !ghosts.isEmpty || !fallingSigns.isEmpty || !snowballs.isEmpty
-            || !splashes.isEmpty || !glassDrops.isEmpty || wet || heightsChanged || windowsChanged || pumpkinsMoved || restyled
+            || !splashes.isEmpty || !glassDrops.isEmpty || wet || !stuck.isEmpty || heightsChanged || windowsChanged || pumpkinsMoved || restyled
         restyled = false
         windowsChanged = false
         pumpkinsMoved = false
@@ -715,7 +762,27 @@ final class SnowSimulation {
             )
             count += 1
         }
+        for knife in stuck where count < capacity {
+            guard let sprite = sprite(of: knife) else { continue }
+            buffer[count] = sprite
+            count += 1
+        }
         for flake in flakes where count < capacity {
+            if flake.knife != 0 {
+                buffer[count] = Sprite(
+                    position: flake.position,
+                    velocity: flake.velocity,
+                    size: flake.size,
+                    alpha: flake.alpha,
+                    soft: 0,
+                    ground: -1e6,
+                    turn: flake.spin != 0 ? flake.angle : atan2(flake.velocity.y, flake.velocity.x),
+                    turnSpeed: flake.spin,
+                    knife: flake.knife
+                )
+                count += 1
+                continue
+            }
             let tilt = isFlower(flake.leaf) ? flowerTilt(seed: flake.leaf, phase: flake.phase) : nil
             buffer[count] = Sprite(
                 position: flake.position,
@@ -1651,25 +1718,51 @@ final class SnowSimulation {
         var i = flakes.count - 1
         while i >= 0 {
             var flake = flakes[i]
-            if flake.blown != 0 {
-                // The nearer the flake, the faster the gust seems to carry it.
-                flake.velocity.x += (flake.blown * gustWind * (1.3 + 1.3 * flake.depth) - flake.velocity.x) * min(1, dt * 2.5)
-            } else {
-                // Rain falls slanted, as wind drives it; snow and leaves only drift.
-                flake.velocity.x += (wind * (flake.rain ? 3 : 1) * (0.35 + 0.65 * flake.depth) - flake.velocity.x) * follow
+            if flake.knife != 0 && flake.spin == 0 && !flake.thrown && flake.blown == 0, let push = strike(flake) {
+                flake.velocity = push
+                flake.thrown = true
+                lastCursorPush = clock
             }
-            flake.velocity.y += (-flake.fallSpeed - flake.velocity.y) * settle
+            if flake.knife != 0 && (flake.spin != 0 || flake.thrown) {
+                // Knocked loose or struck, a knife flies like the heavy thing it is: a loose one turns end over end,
+                // a struck one keeps its tip along its arc.
+                flake.velocity.y -= knifeGravity * dt
+                flake.velocity.x *= exp(-0.4 * dt)
+                flake.angle += flake.spin * dt
+                if flake.blown != 0 {
+                    flake.velocity.x += (flake.blown * gustWind * 1.6 - flake.velocity.x) * min(1, dt * 2.5)
+                }
+            } else {
+                if flake.blown != 0 {
+                    // The nearer the flake, the faster the gust seems to carry it.
+                    flake.velocity.x += (flake.blown * gustWind * (1.3 + 1.3 * flake.depth) - flake.velocity.x) * min(1, dt * 2.5)
+                } else if flake.knife != 0 {
+                    // The storm drives the knives down at a slant; the breeze only leans it a little further.
+                    flake.velocity.x += (knifeLean * knifeSlant * flake.fallSpeed + wind - flake.velocity.x) * follow
+                } else {
+                    // Rain falls slanted, as wind drives it; snow and leaves only drift.
+                    flake.velocity.x += (wind * (flake.rain ? 3 : 1) * (0.35 + 0.65 * flake.depth) - flake.velocity.x) * follow
+                }
+                flake.velocity.y += (-flake.fallSpeed - flake.velocity.y) * settle
+            }
 
-            if let wake, !flake.rain { stir(&flake.velocity, at: flake.position, in: wake, dt: dt) }
+            if let wake, !flake.rain, flake.knife == 0 { stir(&flake.velocity, at: flake.position, in: wake, dt: dt) }
 
             // Harmonic ratios 2.3 and 1.3 stay continuous across the 20π wrap.
             flake.phase += flake.swayRate * dt
             if flake.phase > phaseWrap { flake.phase -= phaseWrap }
             if flake.tintAmount > 0 { flake.tintAmount = max(0, flake.tintAmount - dt * 1.3) }
             let previousY = flake.position.y
+            let previousPosition = flake.position
             flake.position += motion(of: flake) * dt
 
             if flake.blown != 0 && (flake.position.x < -30 || flake.position.x > width + 30) {
+                removeFlake(i)
+                i -= 1
+                continue
+            }
+            if flake.thrown && (flake.position.x < -60 || flake.position.x > width + 60) {
+                // Struck off the side of the screen, it is gone.
                 removeFlake(i)
                 i -= 1
                 continue
@@ -1680,7 +1773,24 @@ final class SnowSimulation {
                 flake.position.x -= width + 60
             }
 
-            if flake.settles && (accumulates || flake.rain) && flake.blown == 0 {
+            if flake.knife != 0 && flake.settles && flake.blown == 0 {
+                // A knife lands where its leading end, not its middle, first meets the edge.
+                let heading = knifeHeading(flake)
+                var lead = heading * flake.size * 0.5
+                // Tumbling, whichever end is lower comes down first.
+                if flake.spin != 0 && lead.y > 0 { lead = -lead }
+                let from = previousPosition + lead
+                let to = flake.position + lead
+                if let hit = landing(x: to.x, from: from.y, to: to.y) {
+                    let surface = hit.layer.surface(hit.index)
+                    let share = from.y > to.y ? max(0, min(1, (from.y - surface) / (from.y - to.y))) : 1
+                    let contact = from + (to - from) * share
+                    stick(flake, in: hit.layer, at: hit.index, contact: contact, lead: lead, heading: heading)
+                    recycle(i)
+                    i -= 1
+                    continue
+                }
+            } else if flake.settles && (accumulates || flake.rain) && flake.blown == 0 {
                 if let hit = landing(x: flake.position.x, from: previousY, to: flake.position.y) {
                     if flake.rain {
                         splash(at: SIMD2(flake.position.x, hit.layer.surface(hit.index)), depth: flake.depth)
@@ -2297,6 +2407,7 @@ final class SnowSimulation {
     private func makeFlake(y: Float) -> Flake {
         if leafy { return makeLeaf(y: y) }
         if rain { return makeRaindrop(y: y) }
+        if knives { return makeKnife(y: y) }
         let near = random.next() < 0.02
         let depth = near ? 1 : pow(random.next(), 1.6)
         let fallSpeed = near ? random.range(75, 100) : 16 + depth * 50 + random.range(0, 10)
@@ -2352,6 +2463,188 @@ final class SnowSimulation {
             settles: true,
             rain: true
         )
+    }
+
+    /// A knife from the sky, flying tip first down the slant of the storm: the nearer, the bigger and faster.
+    private func makeKnife(y: Float) -> Flake {
+        let depth = pow(random.next(), 1.4)
+        let fallSpeed = 480 + depth * 420 + random.range(0, 60)
+        return Flake(
+            position: SIMD2(random.range(-30, width + 30), y),
+            velocity: SIMD2(knifeLean * knifeSlant * fallSpeed, -fallSpeed),
+            fallSpeed: fallSpeed,
+            size: 24 + depth * 32 + random.range(0, 4),
+            depth: depth,
+            alpha: 0.6 + depth * 0.4,
+            soft: 0,
+            phase: 0,
+            swayRate: 0,
+            swayAmount: 0,
+            settles: true,
+            knife: random.range(0.001, 1)
+        )
+    }
+
+    // MARK: - Knives
+
+    /// Which way a knife's tip points: along its flight, or for one knocked loose, wherever its tumbling has turned it.
+    private func knifeHeading(_ flake: Flake) -> SIMD2<Float> {
+        if flake.spin != 0 { return SIMD2(cos(flake.angle), sin(flake.angle)) }
+        return simd_length(flake.velocity) > 0.001 ? simd_normalize(flake.velocity) : SIMD2(0, -1)
+    }
+
+    /// Where the cursor, sweeping through the air, strikes a falling knife anywhere along its length, the velocity it
+    /// sends the knife off with: on the way the cursor was going, as fast and a little faster, and up. A cursor barely
+    /// moving bats it up and away from itself. Nil while the cursor misses it.
+    private func strike(_ flake: Flake) -> SIMD2<Float>? {
+        guard let cursor else { return nil }
+        let heading = simd_length(flake.velocity) > 0 ? simd_normalize(flake.velocity) : SIMD2<Float>(0, -1)
+        let reach = flake.size * 0.5
+        // The cursor's path over the last frame, a few points along it, so a fast swipe doesn't pass through.
+        let previous = cursor - cursorVelocity / 60
+        var hit = false
+        for k in 0...4 where !hit {
+            let point = previous + (cursor - previous) * (Float(k) / 4)
+            let d = point - flake.position
+            let t = max(-reach, min(reach, simd_dot(d, heading)))
+            hit = simd_length(d - heading * t) < cursorRadius + 4
+        }
+        guard hit else { return nil }
+        let speed = simd_length(cursorVelocity)
+        let away = flake.position - cursor
+        let direction = speed > 100 ? cursorVelocity / speed
+            : simd_length(away) > 0.01 ? simd_normalize(away) : SIMD2<Float>(0, 1)
+        let pace = max(550, min(speed * 1.3, 1700))
+        return direction * pace + SIMD2(0, random.range(250, 450))
+    }
+
+    /// A knife coming down tip first sinks into what it hits and quivers; one coming down handle first, or flat,
+    /// clatters down and lies there.
+    /// `contact` is where its leading end crossed the edge, `lead` from its middle to that end.
+    private func stick(_ flake: Flake, in layer: SnowLayer, at index: Int, contact: SIMD2<Float>, lead: SIMD2<Float>, heading: SIMD2<Float>) {
+        let surface = layer.surface(index)
+        var angle = atan2(heading.y, heading.x)
+        // Pointing well downward, and with its tip leading rather than its pommel, the tip bites; otherwise it lands
+        // on its side, where its middle was.
+        let tipFirst = sin(angle) < -0.5 && simd_dot(lead, heading) > 0
+        let bury: Float
+        if tipFirst {
+            bury = random.range(0.12, 0.3) * (0.6 + 0.4 * min(1, simd_length(flake.velocity) / 700))
+        } else {
+            bury = 0
+            angle = (cos(angle) >= 0 ? 0 : .pi) + random.range(-0.06, 0.06)
+        }
+        stuck.append(StuckKnife(
+            layer: layer,
+            x: (tipFirst ? contact.x : contact.x - lead.x) - layer.base.x,
+            rest: surface - layer.base.y,
+            angle: angle,
+            size: flake.size,
+            seed: flake.knife,
+            bury: bury,
+            life: random.range(4, 7)
+        ))
+        if stuck.count > maxStuck { stuck.removeFirst() }
+    }
+
+    /// Where a stuck knife's middle is, and which way it points, quivering for a moment after it bit.
+    private func pose(of knife: StuckKnife) -> (center: SIMD2<Float>, angle: Float, contact: SIMD2<Float>) {
+        let contact = knife.layer.base + SIMD2(knife.x, knife.rest)
+        if knife.bury == 0 {
+            // Lying flat on top, its blade a little above the edge.
+            return (contact + SIMD2(0, knife.size * 0.04), knife.angle, contact)
+        }
+        let angle = knife.angle + 0.1 * sin(knife.age * 55) * exp(-knife.age * 7)
+        let along = SIMD2(cos(angle), sin(angle))
+        return (contact + along * knife.size * (knife.bury - 0.5), angle, contact)
+    }
+
+    private func sprite(of knife: StuckKnife) -> Sprite? {
+        let shown = layers.contains { $0 === knife.layer }
+        guard shown, let i = knife.layer.index(at: knife.layer.base.x + knife.x), knife.layer.visible[i] else { return nil }
+        let pose = pose(of: knife)
+        return Sprite(
+            position: pose.center,
+            size: knife.size,
+            alpha: knife.fade,
+            soft: 0,
+            ground: knife.bury > 0 ? pose.contact.y : -1e6,
+            turn: pose.angle,
+            knife: knife.seed
+        )
+    }
+
+    /// A stuck knife let go: it falls end over end from where it was.
+    private func loosen(_ k: Int, velocity: SIMD2<Float>, blown: Float = 0) {
+        let knife = stuck.remove(at: k)
+        let pose = pose(of: knife)
+        flakes.append(Flake(
+            position: pose.center,
+            velocity: velocity,
+            fallSpeed: 0,
+            size: knife.size,
+            depth: 1,
+            alpha: knife.fade,
+            soft: 0,
+            phase: 0,
+            swayRate: 0,
+            swayAmount: 0,
+            settles: true,
+            blown: blown,
+            knife: knife.seed,
+            angle: pose.angle,
+            spin: random.range(7, 14) * (random.next() < 0.5 ? -1 : 1)
+        ))
+    }
+
+    /// Stuck knives come loose when the cursor knocks them, their window is shaken, jerked away or closed, and fade
+    /// out after a few seconds.
+    private func tendKnives(dt: Float) {
+        guard !stuck.isEmpty else { return }
+        let shown = Set(layers.map(ObjectIdentifier.init))
+        let kept = Set(dormant.values.map(ObjectIdentifier.init) + parking.map { ObjectIdentifier($0.ledge) })
+        let speed = simd_length(cursorVelocity)
+        for k in stuck.indices.reversed() {
+            var knife = stuck[k]
+            let layer = knife.layer
+            guard shown.contains(ObjectIdentifier(layer)) else {
+                // A window on another Space keeps its knives; one closed or hidden drops them.
+                if !kept.contains(ObjectIdentifier(layer)) { loosen(k, velocity: SIMD2(random.range(-30, 30), 0)) }
+                continue
+            }
+            guard layer.index(at: layer.base.x + knife.x) != nil else {
+                loosen(k, velocity: SIMD2(layer.trackVelocity.x, 0))
+                continue
+            }
+            if let cursor, speed > 120 {
+                // Struck anywhere along its length above the edge.
+                let pose = pose(of: knife)
+                let along = SIMD2(cos(pose.angle), sin(pose.angle))
+                let d = cursor - pose.center
+                let t = max(-0.5, min(0.5 - knife.bury, simd_dot(d, along) / knife.size)) * knife.size
+                if simd_length(d - along * t) < cursorRadius + 3 {
+                    var v = cursorVelocity
+                    let s = simd_length(v)
+                    if s > 900 { v *= 900 / s }
+                    loosen(k, velocity: v * 0.7 + SIMD2(0, random.range(120, 300)))
+                    lastCursorPush = clock
+                    continue
+                }
+            }
+            if layer.agitation > shaking * 0.5 || simd_length(layer.jolt) > knifeJolt {
+                loosen(k, velocity: layer.trackVelocity * 0.8 + SIMD2(random.range(-120, 120), random.range(60, 240)))
+                continue
+            }
+            knife.age += dt
+            if knife.age > knife.life {
+                knife.fade -= dt / 0.8
+            }
+            if knife.fade <= 0 {
+                stuck.remove(at: k)
+            } else {
+                stuck[k] = knife
+            }
+        }
     }
 
     // MARK: - Rain
@@ -2988,6 +3281,15 @@ final class SnowSimulation {
             grains[i].area = 0
             grains[i].velocity = SIMD2(gust.direction * random.range(800, 1600), random.range(60, 300))
         }
+        for k in stuck.indices.reversed() {
+            let knife = stuck[k]
+            guard finish || gust.calm || (front - knife.layer.base.x - knife.x) * gust.direction > 0 else { continue }
+            if gust.calm {
+                stuck.remove(at: k)
+            } else {
+                loosen(k, velocity: SIMD2(gust.direction * random.range(500, 1100), random.range(100, 300)), blown: gust.direction)
+            }
+        }
         for k in lying.indices.reversed() {
             let leaf = lying[k]
             guard finish || gust.calm || (front - leaf.layer.heapX - leaf.x) * gust.direction > 0 else { continue }
@@ -3129,6 +3431,7 @@ final class SnowSimulation {
     /// How a flake actually moves: carried along, swaying from side to side, and for a leaf, swinging like a
     /// pendulum, dropping fastest through the middle of each swing.
     private func motion(of flake: Flake) -> SIMD2<Float> {
+        if flake.knife != 0 { return flake.velocity }
         if isFlower(flake.leaf) {
             // A whole flower falls cup up and steadier than a leaf, rocking only a little as it spins.
             let sway = cos(flake.phase) * flake.swayAmount * 0.3
@@ -3353,7 +3656,7 @@ final class SnowSimulation {
     }
 
     private func updateTarget() {
-        let share: Float = leafy ? leafShare : rain ? rainShare : 1
+        let share: Float = leafy ? leafShare : rain ? rainShare : knives ? knifeShare : 1
         targetFlakes = snowfallHeld ? 0 : Int(snowfall.flakesPerMegapoint * share * strength * density * width * height / 1_000_000)
     }
 

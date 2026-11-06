@@ -217,10 +217,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         let fastest = budget == .full ? interactiveFrameRate : min(60, interactiveFrameRate)
         // 24 only where it divides the display's rate evenly; elsewhere it would judder.
         let calm = budget == .saver && interactiveFrameRate % 24 == 0 ? 24 : 30
-        let frameRate = switch simulation.pace {
+        var frameRate = switch simulation.pace {
         case .calm: calm
         case .lively: min(60, fastest)
         case .interactive: fastest
+        }
+        // Knives ask for a high rate the whole time they fall. Off the power adapter they fall at the calm rate, and
+        // only one struck or knocked loose is drawn at 60; in Low Power Mode, or running hot, everything stays calm.
+        if simulation.knives && budget != .full {
+            frameRate = budget == .battery && simulation.pace == .interactive ? min(60, fastest) : calm
         }
         let pace = maxFrameRate ? interactiveFrameRate : lanternMoved ? max(frameRate, min(60, fastest)) : frameRate
         if view.preferredFramesPerSecond != pace { view.preferredFramesPerSecond = pace }
