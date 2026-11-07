@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
     private var autumnItem: NSMenuItem!
     private var rainItem: NSMenuItem!
     private var blossomItem: NSMenuItem!
+    private var firefliesItem: NSMenuItem!
+    /// The Behavior section's header and the separator after it, hidden with the section when none of it applies.
+    private var behaviorItems: [NSMenuItem] = []
     private var maxPerformanceItem: NSMenuItem!
     private var behindWindowsItem: NSMenuItem!
     private var fullScreenItem: NSMenuItem!
@@ -153,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
         autumnItem = add("Autumn Leaves", #selector(chooseMode), to: modes)
         rainItem = add("Rain", #selector(chooseMode), to: modes)
         blossomItem = add("Cherry Blossom", #selector(chooseMode), to: modes)
+        firefliesItem = add("Fireflies", #selector(chooseMode), to: modes)
         modes.addItem(.separator())
         halloweenItem = add("Halloween", #selector(toggleHalloween), to: modes)
         menu.addItem(withTitle: "Mode", action: nil, keyEquivalent: "").submenu = modes
@@ -160,12 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
         menu.addItem(.separator())
         let settings = NSMenu()
         settings.autoenablesItems = false
-        settings.addItem(.sectionHeader(title: "Behavior"))
+        let behavior = NSMenuItem.sectionHeader(title: "Behavior")
+        settings.addItem(behavior)
         accumulateItem = toggle("Accumulate", #selector(toggleAccumulate), to: settings)
         meltItem = toggle("Melt Snow", #selector(toggleMeltSnow), to: settings)
         snowOnWindowsItem = toggle("Snow on Windows", #selector(toggleSnowOnWindows), to: settings)
         deepInteractionItem = toggle("Deep Interaction", #selector(toggleDeepInteraction), to: settings)
-        settings.addItem(.separator())
+        let afterBehavior = NSMenuItem.separator()
+        settings.addItem(afterBehavior)
+        behaviorItems = [behavior, afterBehavior]
         settings.addItem(.sectionHeader(title: "Display"))
         behindWindowsItem = toggle("Behind Windows", #selector(toggleBehindWindows), to: settings)
         fullScreenItem = toggle("Show over Full Screen", #selector(toggleFullScreen), to: settings)
@@ -204,14 +211,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
         let autumn = mode == .autumn
         let rain = mode == .rain
         let blossom = mode == .blossom
+        let fireflies = mode == .fireflies
         snowItem.state = mode == .snow ? .on : .off
         autumnItem.state = autumn ? .on : .off
         rainItem.state = rain ? .on : .off
         blossomItem.state = blossom ? .on : .off
-        // Rain neither heaps up nor lies about to clear away.
-        accumulateItem.isHidden = rain
-        meltItem.isHidden = rain
-        clearItem.isHidden = rain
+        firefliesItem.state = fireflies ? .on : .off
+        // Rain neither heaps up nor lies about to clear away; fireflies never land at all.
+        accumulateItem.isHidden = rain || fireflies
+        meltItem.isHidden = rain || fireflies
+        clearItem.isHidden = rain || fireflies
+        snowOnWindowsItem.isHidden = fireflies
+        deepInteractionItem.isHidden = fireflies
+        for item in behaviorItems { item.isHidden = fireflies }
         meltItem.title = autumn ? "Wither Leaves" : blossom ? "Wilt Petals" : "Melt Snow"
         snowOnWindowsItem.title = autumn ? "Leaves on Windows" : blossom ? "Petals on Windows" : rain ? "Rain on Windows" : "Snow on Windows"
         clearItem.title = autumn ? "Clear Leaves" : blossom ? "Clear Petals" : "Clear Snow"
@@ -304,7 +316,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
     }
 
     @objc private func chooseMode(_ sender: NSMenuItem) {
-        let mode: Mode = sender === autumnItem ? .autumn : sender === rainItem ? .rain : sender === blossomItem ? .blossom : .snow
+        let mode: Mode = sender === autumnItem ? .autumn : sender === rainItem ? .rain : sender === blossomItem ? .blossom
+            : sender === firefliesItem ? .fireflies : .snow
         guard mode != Preferences.mode else { return }
         Preferences.mode = mode
         refreshHalloween()
@@ -328,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
         statusItem.button?.image = Self.icon(halloween: halloween, dimmed: snowfall == .off)
     }
 
-    private static let symbol: [Mode: String] = [.snow: "snowflake", .autumn: "leaf", .rain: "cloud.rain"]
+    private static let symbol: [Mode: String] = [.snow: "snowflake", .autumn: "leaf", .rain: "cloud.rain", .fireflies: "sparkle"]
 
     private static func icon(halloween: Bool, dimmed: Bool) -> NSImage? {
         let image = halloween ? Halloween.icon : Preferences.mode == .blossom ? Blossom.icon
