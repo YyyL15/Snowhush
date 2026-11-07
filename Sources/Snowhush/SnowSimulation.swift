@@ -2,9 +2,10 @@ import CoreGraphics
 import Foundation
 import simd
 
-/// What falls: snow, autumn leaves, rain or cherry blossom petals.
+/// What falls: snow, autumn leaves, rain, cherry blossom petals or dandelion seeds.
 enum Mode: Int {
     case snow, autumn, rain, blossom
+    case dandelion = 5
 }
 
 struct Sprite {
@@ -52,6 +53,8 @@ struct Sprite {
     /// Rain instead of snow: one for a raindrop or a splash in the air, two for a drop running down the glass, three for
     /// one hanging under an edge, four for spray on the glass, five for the film a running drop leaves behind.
     var rain: Float = 0
+    /// A dandelion seed instead of snow: its seed, which varies its tuft; zero for snow. `turn` is how far it leans.
+    var dandelion: Float = 0
 }
 
 /// A Halloween sign a ghost holds up, or lets fall into the snow.
@@ -114,6 +117,23 @@ private struct Flake {
     /// A drop come off the glass: how big the water it carries is, to run on down whatever window it lands on; zero
     /// for rain from the sky.
     var water: Float = 0
+    /// A dandelion seed instead of a flake: its seed; zero for snow.
+    var dandelion: Float = 0
+}
+
+/// A dandelion seed come to rest on a window's top edge, the Dock or the bottom of the screen, standing on its tip
+/// with its tuft up. A breath of air, the cursor passing or its window moving lifts it off again; left alone, it fades.
+private struct RestingSeed {
+    let layer: SnowLayer
+    /// Where its tip rests, from the layer's base.
+    var x: Float
+    var rest: Float
+    let lean: Float
+    let size: Float
+    let seed: Float
+    var age: Float = 0
+    let life: Float
+    var fade: Float = 1
 }
 
 /// A droplet thrown up where a raindrop bursts on a window's edge or the bottom of the screen.
@@ -438,6 +458,10 @@ final class SnowSimulation {
     /// Rain crosses the screen in a second or so, where a flake takes half a minute: far fewer are in sight at once.
     private let rainShare: Float = 0.12
     private let rainGravity: Float = 900
+    /// Dandelion seeds drift down slowly and linger in the air, so fewer than snowflakes are needed.
+    private let seedShare: Float = 0.12
+    private let maxResting = 300
+    private var resting: [RestingSeed] = []
     private let maxSplashes = 1500
     private var splashes: [Splash] = []
     /// The share of raindrops hitting a window's top edge that run on down its face.
@@ -568,6 +592,7 @@ final class SnowSimulation {
         didSet {
             guard mode != oldValue else { return }
             lying.removeAll()
+            resting.removeAll()
             updateTarget()
             flakes = flakes.prefix(targetFlakes).map { makeFlake(y: $0.position.y) }
             restyled = true
@@ -578,6 +603,7 @@ final class SnowSimulation {
     var leafy: Bool { mode == .autumn || mode == .blossom }
     var blossom: Bool { mode == .blossom }
     var rain: Bool { mode == .rain }
+    var dandelion: Bool { mode == .dandelion }
     private var restyled = false
     /// The mode waiting for the gust to clear the screen, so one kind never turns into the other in sight.
     private var nextMode: Mode?
@@ -609,18 +635,18 @@ final class SnowSimulation {
     }
 
     var pileTop: Float { ground.top }
-    var hasSnow: Bool { !lying.isEmpty || layers.contains { $0.top > 0.5 } }
+    var hasSnow: Bool { !lying.isEmpty || !resting.isEmpty || layers.contains { $0.top > 0.5 } }
     /// Nothing falls, lies, waits for its window or haunts, and nothing will until the snow is stirred.
     var isEmpty: Bool {
         snowfall == .off && !halloween && flakes.isEmpty && grains.isEmpty && motes.isEmpty && ghosts.isEmpty
             && fallingSigns.isEmpty && snowballs.isEmpty && gust == nil && dormant.isEmpty && parking.isEmpty && lying.isEmpty && nextMode == nil
-            && splashes.isEmpty && glassDrops.isEmpty && !wet
+            && splashes.isEmpty && glassDrops.isEmpty && !wet && resting.isEmpty
             && !layers.contains { $0.top > 0 }
     }
     /// Running drops or beads on the glass, drawn from a field of their own.
     var hasGlassDrops: Bool { glassDrops.contains { !$0.hanging } }
     var spriteCount: Int {
-        lying.count + flakes.count + grains.count + motes.count + ghosts.count * 2 + snowballs.count + splashes.count + glassDrops.count
+        lying.count + resting.count + flakes.count + grains.count + motes.count + ghosts.count * 2 + snowballs.count + splashes.count + glassDrops.count
             + ledgeList.reduce(0) { $0 + $1.spray.count + $1.film.count }
     }
     /// Floats the renderer needs per frame: each layer's surface and bed.
@@ -638,7 +664,7 @@ final class SnowSimulation {
     func step(dt: Float, cursor point: SIMD2<Float>) -> Bool {
         clock += Double(dt)
         let wasMoving = !flakes.isEmpty || !grains.isEmpty || !motes.isEmpty || !ghosts.isEmpty || !fallingSigns.isEmpty || !snowballs.isEmpty
-            || !splashes.isEmpty || !glassDrops.isEmpty || wet
+            || !splashes.isEmpty || !glassDrops.isEmpty || wet || !resting.isEmpty
         heightsChanged = false
         leafBudget = nil
 
@@ -659,6 +685,7 @@ final class SnowSimulation {
         haunt(dt: dt)
         settle(dt: dt)
         tendLeaves(dt: dt)
+        tendSeeds(dt: dt)
         if let next = nextMode, gust == nil, grains.isEmpty || clock - switchedAt > 6 {
             nextMode = nil
             mode = next
@@ -682,7 +709,7 @@ final class SnowSimulation {
             pace = .calm
         }
         let changed = wasMoving || !flakes.isEmpty || !grains.isEmpty || !motes.isEmpty || !ghosts.isEmpty || !fallingSigns.isEmpty || !snowballs.isEmpty
-            || !splashes.isEmpty || !glassDrops.isEmpty || wet || heightsChanged || windowsChanged || pumpkinsMoved || restyled
+            || !splashes.isEmpty || !glassDrops.isEmpty || wet || !resting.isEmpty || heightsChanged || windowsChanged || pumpkinsMoved || restyled
         restyled = false
         windowsChanged = false
         pumpkinsMoved = false
@@ -715,7 +742,34 @@ final class SnowSimulation {
             )
             count += 1
         }
+        for seed in resting where count < capacity {
+            let layer = seed.layer
+            guard layers.contains(where: { $0 === layer }), let i = layer.index(at: layer.base.x + seed.x), layer.visible[i] else { continue }
+            // Standing on its tip: its middle is half its height above, along its lean.
+            let tip = layer.base + SIMD2(seed.x, seed.rest)
+            buffer[count] = Sprite(
+                position: tip + SIMD2(-sin(seed.lean), cos(seed.lean)) * seed.size * 0.5,
+                size: seed.size,
+                alpha: seed.fade,
+                soft: 0,
+                turn: seed.lean,
+                dandelion: seed.seed
+            )
+            count += 1
+        }
         for flake in flakes where count < capacity {
+            if flake.dandelion != 0 {
+                buffer[count] = Sprite(
+                    position: flake.position,
+                    size: flake.size,
+                    alpha: flake.alpha,
+                    soft: 0,
+                    turn: lean(of: flake),
+                    dandelion: flake.dandelion
+                )
+                count += 1
+                continue
+            }
             let tilt = isFlower(flake.leaf) ? flowerTilt(seed: flake.leaf, phase: flake.phase) : nil
             buffer[count] = Sprite(
                 position: flake.position,
@@ -1654,13 +1708,19 @@ final class SnowSimulation {
             if flake.blown != 0 {
                 // The nearer the flake, the faster the gust seems to carry it.
                 flake.velocity.x += (flake.blown * gustWind * (1.3 + 1.3 * flake.depth) - flake.velocity.x) * min(1, dt * 2.5)
+            } else if flake.dandelion != 0 {
+                // A seed rides the breeze, further than snow does.
+                flake.velocity.x += (wind * 1.8 * (0.5 + 0.5 * flake.depth) - flake.velocity.x) * follow * 0.6
             } else {
                 // Rain falls slanted, as wind drives it; snow and leaves only drift.
                 flake.velocity.x += (wind * (flake.rain ? 3 : 1) * (0.35 + 0.65 * flake.depth) - flake.velocity.x) * follow
             }
-            flake.velocity.y += (-flake.fallSpeed - flake.velocity.y) * settle
+            // Its tuft holds a seed up: thrown up by the air, it takes a long while to settle back to its slow fall.
+            flake.velocity.y += (-flake.fallSpeed - flake.velocity.y) * (flake.dandelion != 0 ? settle * 0.35 : settle)
 
-            if let wake, !flake.rain { stir(&flake.velocity, at: flake.position, in: wake, dt: dt) }
+            if let wake, !flake.rain {
+                stir(&flake.velocity, at: flake.position, in: wake, dt: dt, strength: flake.dandelion != 0 ? 3 : 1)
+            }
 
             // Harmonic ratios 2.3 and 1.3 stay continuous across the 20π wrap.
             flake.phase += flake.swayRate * dt
@@ -1680,8 +1740,14 @@ final class SnowSimulation {
                 flake.position.x -= width + 60
             }
 
-            if flake.settles && (accumulates || flake.rain) && flake.blown == 0 {
+            if flake.settles && (accumulates || flake.rain || flake.dandelion != 0) && flake.blown == 0 {
                 if let hit = landing(x: flake.position.x, from: previousY, to: flake.position.y) {
+                    if flake.dandelion != 0 {
+                        rest(flake, on: hit.layer, at: hit.index)
+                        recycle(i)
+                        i -= 1
+                        continue
+                    }
                     if flake.rain {
                         splash(at: SIMD2(flake.position.x, hit.layer.surface(hit.index)), depth: flake.depth)
                         if hit.layer !== ground {
@@ -1730,12 +1796,14 @@ final class SnowSimulation {
         return (cursor, speed > 500 ? cursorVelocity * (500 / speed) : cursorVelocity)
     }
 
-    private func stir(_ velocity: inout SIMD2<Float>, at position: SIMD2<Float>, in wake: (center: SIMD2<Float>, velocity: SIMD2<Float>), dt: Float) {
-        let radius: Float = 80
+    /// `strength` is how readily it is carried: a light dandelion seed far more than snow, and from further off.
+    private func stir(_ velocity: inout SIMD2<Float>, at position: SIMD2<Float>, in wake: (center: SIMD2<Float>, velocity: SIMD2<Float>), dt: Float,
+                      strength: Float = 1) {
+        let radius: Float = 80 * (strength > 1 ? 1.5 : 1)
         let distanceSquared = simd_length_squared(position - wake.center)
         guard distanceSquared < radius * radius else { return }
         let falloff = 1 - distanceSquared.squareRoot() / radius
-        velocity += (wake.velocity - velocity) * min(1, falloff * falloff * 4 * dt)
+        velocity += (wake.velocity - velocity) * min(1, falloff * falloff * 4 * strength * dt)
     }
 
     private func advanceGrains(dt: Float) {
@@ -2297,6 +2365,7 @@ final class SnowSimulation {
     private func makeFlake(y: Float) -> Flake {
         if leafy { return makeLeaf(y: y) }
         if rain { return makeRaindrop(y: y) }
+        if dandelion { return makeSeed(y: y) }
         let near = random.next() < 0.02
         let depth = near ? 1 : pow(random.next(), 1.6)
         let fallSpeed = near ? random.range(75, 100) : 16 + depth * 50 + random.range(0, 10)
@@ -2352,6 +2421,115 @@ final class SnowSimulation {
             settles: true,
             rain: true
         )
+    }
+
+    // MARK: - Dandelion
+
+    /// A dandelion seed drifting down under its tuft: the nearer, the bigger and a little faster.
+    private func makeSeed(y: Float) -> Flake {
+        let depth = pow(random.next(), 1.3)
+        let fallSpeed = 12 + depth * 16 + random.range(0, 6)
+        return Flake(
+            position: SIMD2(random.range(-30, width + 30), y),
+            velocity: SIMD2(windSpeed() * 1.8 * (0.5 + 0.5 * depth), -fallSpeed),
+            fallSpeed: fallSpeed,
+            size: 13 + depth * 11 + random.range(0, 2),
+            depth: depth,
+            alpha: 0.6 + depth * 0.4,
+            soft: 0,
+            phase: random.range(0, phaseWrap),
+            swayRate: random.range(0.3, 0.7),
+            swayAmount: random.range(8, 18) + depth * 8,
+            settles: true,
+            dandelion: random.range(0.001, 1)
+        )
+    }
+
+    /// How far a seed leans from upright: it rocks a little as it sways, and its tuft trails behind when the air
+    /// carries it sideways.
+    private func lean(of flake: Flake) -> Float {
+        let motion = motion(of: flake)
+        return 0.18 * sin(flake.phase) + max(-0.6, min(0.6, motion.x * 0.006))
+    }
+
+    private func rest(_ flake: Flake, on layer: SnowLayer, at index: Int) {
+        resting.append(RestingSeed(
+            layer: layer,
+            x: flake.position.x - layer.base.x,
+            rest: layer.surface(index) - layer.base.y,
+            lean: random.range(-0.35, 0.35),
+            size: flake.size,
+            seed: flake.dandelion,
+            life: random.range(6, 12)
+        ))
+        if resting.count > maxResting { resting.removeFirst() }
+    }
+
+    /// A resting seed taken up into the air again.
+    private func lift(_ k: Int, velocity: SIMD2<Float>, blown: Float = 0) {
+        let seed = resting.remove(at: k)
+        flakes.append(Flake(
+            position: seed.layer.base + SIMD2(seed.x, seed.rest + seed.size * 0.5),
+            velocity: velocity,
+            fallSpeed: 12 + seed.size,
+            size: seed.size,
+            depth: min(1, (seed.size - 13) / 11),
+            alpha: seed.fade,
+            soft: 0,
+            phase: random.range(0, phaseWrap),
+            swayRate: random.range(0.3, 0.7),
+            swayAmount: random.range(8, 18),
+            settles: true,
+            blown: blown,
+            dandelion: seed.seed
+        ))
+    }
+
+    /// Resting seeds lift off when the cursor passes close, their window moves, closes or is shaken, or now and then
+    /// on a breath of the breeze, and fade out after a while.
+    private func tendSeeds(dt: Float) {
+        guard !resting.isEmpty else { return }
+        let shown = Set(layers.map(ObjectIdentifier.init))
+        let kept = Set(dormant.values.map(ObjectIdentifier.init) + parking.map { ObjectIdentifier($0.ledge) })
+        let speed = simd_length(cursorVelocity)
+        let wind = breeze()
+        for k in resting.indices.reversed() {
+            var seed = resting[k]
+            let layer = seed.layer
+            guard shown.contains(ObjectIdentifier(layer)) else {
+                if !kept.contains(ObjectIdentifier(layer)) { lift(k, velocity: SIMD2(random.range(-15, 15), random.range(10, 30))) }
+                continue
+            }
+            guard layer.index(at: layer.base.x + seed.x) != nil else {
+                lift(k, velocity: SIMD2(layer.trackVelocity.x, 20))
+                continue
+            }
+            let tip = layer.base + SIMD2(seed.x, seed.rest)
+            if let cursor, speed > 30, simd_length(tip + SIMD2(0, seed.size * 0.5) - cursor) < 45 {
+                // The air the cursor drags along takes it up.
+                var v = cursorVelocity
+                if speed > 400 { v *= 400 / speed }
+                lift(k, velocity: v * 0.5 + SIMD2(0, random.range(40, 110)))
+                lastCursorPush = clock
+                continue
+            }
+            if layer.agitation > 0.5 || simd_length(layer.trackVelocity) > 120 {
+                lift(k, velocity: layer.trackVelocity * 0.4 + SIMD2(random.range(-30, 30), random.range(30, 90)))
+                continue
+            }
+            // A breath of the breeze lifts one now and then, the more often the stronger it blows.
+            if random.next() < 0.03 * abs(wind) / 10 * dt {
+                lift(k, velocity: SIMD2(wind * 2, random.range(25, 60)))
+                continue
+            }
+            seed.age += dt
+            if seed.age > seed.life { seed.fade -= dt / 1.5 }
+            if seed.fade <= 0 {
+                resting.remove(at: k)
+            } else {
+                resting[k] = seed
+            }
+        }
     }
 
     // MARK: - Rain
@@ -2988,6 +3166,15 @@ final class SnowSimulation {
             grains[i].area = 0
             grains[i].velocity = SIMD2(gust.direction * random.range(800, 1600), random.range(60, 300))
         }
+        for k in resting.indices.reversed() {
+            let seed = resting[k]
+            guard finish || gust.calm || (front - seed.layer.base.x - seed.x) * gust.direction > 0 else { continue }
+            if gust.calm {
+                resting.remove(at: k)
+            } else {
+                lift(k, velocity: SIMD2(gust.direction * random.range(300, 700), random.range(60, 200)), blown: gust.direction)
+            }
+        }
         for k in lying.indices.reversed() {
             let leaf = lying[k]
             guard finish || gust.calm || (front - leaf.layer.heapX - leaf.x) * gust.direction > 0 else { continue }
@@ -3129,6 +3316,11 @@ final class SnowSimulation {
     /// How a flake actually moves: carried along, swaying from side to side, and for a leaf, swinging like a
     /// pendulum, dropping fastest through the middle of each swing.
     private func motion(of flake: Flake) -> SIMD2<Float> {
+        if flake.dandelion != 0 {
+            // It sways wide and slow, and bobs on the air, now and then almost hanging still.
+            let sway = cos(flake.phase) * flake.swayAmount * 0.6
+            return SIMD2(flake.velocity.x + sway, flake.velocity.y * (0.55 + 0.45 * sin(flake.phase * 0.8)))
+        }
         if isFlower(flake.leaf) {
             // A whole flower falls cup up and steadier than a leaf, rocking only a little as it spins.
             let sway = cos(flake.phase) * flake.swayAmount * 0.3
@@ -3353,7 +3545,7 @@ final class SnowSimulation {
     }
 
     private func updateTarget() {
-        let share: Float = leafy ? leafShare : rain ? rainShare : 1
+        let share: Float = leafy ? leafShare : rain ? rainShare : dandelion ? seedShare : 1
         targetFlakes = snowfallHeld ? 0 : Int(snowfall.flakesPerMegapoint * share * strength * density * width * height / 1_000_000)
     }
 

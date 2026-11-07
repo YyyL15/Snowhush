@@ -50,6 +50,7 @@ struct Sprite {
     float turnSpeed;
     float flipSpeed;
     float rain;
+    float dandelion;
 };
 
 struct SpriteOut {
@@ -85,6 +86,7 @@ struct SpriteOut {
     float rain;
     /// For a drop running down the glass, the share of it from its head back that is its smear over the exposure.
     float blur;
+    float dandelion;
 };
 
 constant float3 candle = float3(1.0, 0.62, 0.26);
@@ -342,6 +344,71 @@ static float4 leafAt(float2 p, float seed, float turn, float flip, float alpha, 
     return float4(color * a, a);
 }
 
+/// How far `p` is from the segment from `a` to `b`.
+static float segmentDistance(float2 p, float2 a, float2 b) {
+    float2 ab = b - a;
+    float t = saturate(dot(p - a, ab) / max(dot(ab, ab), 1e-6));
+    return length(p - a - ab * t);
+}
+
+/// A dandelion seed, `p` running across it from -0.5 to 0.5, upright less `lean`: a small brown seed at the foot, a
+/// fine beak rising from it, and at the top a parachute of fine white hairs fanning out and up, each ending in a
+/// little wisp. Every hair is a pixel or so wide however small the seed, with a faint grey edge so it shows over a
+/// light window as well as a dark one. Premultiplied.
+static float4 dandelionAt(float2 p, float seed, float lean, float alpha, float3 light, float warm) {
+    float2 q = float2(cos(lean) * p.x + sin(lean) * p.y, -sin(lean) * p.x + cos(lean) * p.y);
+    // A pixel, across the seed.
+    float pixel = max(fwidth(q.x), 1e-4);
+    float white = 0.0;
+    float grey = 0.0;
+
+    // The beak, from the seed up to where the hairs spread.
+    const float2 crown = float2(0.0, 0.08);
+    float beak = segmentDistance(q, float2(0.0, -0.33), crown);
+    white = max(white, saturate(1.0 - beak / (pixel * 0.6)) * 0.85);
+    grey = max(grey, saturate(1.0 - beak / (pixel * 1.4)));
+
+    // The hairs fan out from the crown in an arc, slightly bowed outward, each a little different in length.
+    const int hairs = 15;
+    for (int i = 0; i < hairs; i++) {
+        float k = float(i) / float(hairs - 1);
+        float jitter = fract(sin((float(i) + seed * 31.0) * 12.9898) * 43758.5);
+        float angle = mix(-1.25, 1.25, k) + (jitter - 0.5) * 0.12;
+        float reach = 0.36 * (0.88 + 0.12 * jitter);
+        float2 direction = float2(sin(angle), cos(angle));
+        float2 middle = crown + direction * reach * 0.5 + float2(direction.y, -direction.x) * sign(angle) * -0.015;
+        float2 end = crown + direction * reach;
+        float d = min(segmentDistance(q, crown, middle), segmentDistance(q, middle, end));
+        white = max(white, saturate(1.0 - d / (pixel * 0.55)) * 0.75);
+        grey = max(grey, saturate(1.0 - d / (pixel * 1.3)));
+        // The wisp at its end.
+        float wisp = length(q - end) / 0.03;
+        white = max(white, saturate(1.0 - wisp) * 0.45);
+    }
+    // A faint haze between the hairs, so the tuft reads as soft rather than as spokes.
+    float2 fromCrown = q - crown;
+    float radius = length(fromCrown);
+    float spread = abs(atan2(fromCrown.x, fromCrown.y));
+    float fan = smoothstep(1.3, 1.1, spread) * smoothstep(0.36, 0.28, radius) * smoothstep(0.02, 0.1, radius);
+    white = max(white, fan * 0.07);
+
+    // The seed itself, a small brown spindle.
+    float2 body = (q - float2(0.0, -0.41)) / float2(0.021, 0.085);
+    float inside = (1.0 - length(body)) * 0.021;
+    float seedCover = smoothstep(-pixel * 0.5, pixel * 0.5, inside);
+    grey = max(grey, smoothstep(-pixel * 1.2, 0.0, inside));
+
+    float3 tuft = float3(0.97, 0.97, 0.94) * mix(float3(1.0), light, 0.6);
+    tuft = mix(tuft, candle, warm * 0.4);
+    float3 brown = float3(0.42, 0.3, 0.2) * mix(float3(1.0), light, 0.6);
+    float3 dark = float3(0.3, 0.32, 0.35);
+    // Layered as premultiplied colour: the grey edge, the white hairs over it, the seed over both.
+    float4 color = float4(dark * grey * 0.22, grey * 0.22);
+    color = over(float4(tuft * white, white), color);
+    color = over(float4(brown * seedCover, seedCover), color);
+    return color * alpha;
+}
+
 static float flicker(float time, float seed) {
     return 0.86 + 0.08 * sin(time * 11.0 + seed * 2.1) + 0.06 * sin(time * 29.0 + 1.3 + seed * 4.3);
 }
@@ -384,6 +451,21 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
                               const device Sprite *sprites [[buffer(0)]],
                               constant Uniforms &u [[buffer(1)]]) {
     Sprite s = sprites[vid];
+    if (s.dandelion != 0.0) {
+        // A dandelion seed drifts too slowly to smear.
+        SpriteOut out;
+        out.position = float4((s.position + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
+        out.pointSize = max(s.size * u.scale, 4.0);
+        out.alpha = s.alpha;
+        out.light = u.light.rgb;
+        out.warm = candlelight(u, s.position);
+        out.turn = s.turn;
+        out.dandelion = s.dandelion;
+        out.leaf = 0.0;
+        out.ghost = 0.0;
+        out.rain = 0.0;
+        return out;
+    }
     if (s.leaf != 0.0) {
         SpriteOut out;
         // About a 1/40 s exposure: at 30 frames a second a falling leaf smears most of the way to where the next
@@ -411,6 +493,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.flip = s.flip;
         out.ghost = 0.0;
         out.rain = 0.0;
+        out.dandelion = 0.0;
         return out;
     }
     if (s.rain > 4.5) {
@@ -433,6 +516,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.rain = s.rain;
         out.size = pixels;
         out.blur = 0.0;
+        out.dandelion = 0.0;
         return out;
     }
     if (s.rain != 0.0) {
@@ -478,6 +562,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.turn = s.turn;
         out.tint = float4(0.0, 0.0, 0.0, s.tintAmount);
         out.turnSmear = s.turnSpeed;
+        out.dandelion = 0.0;
         return out;
     }
     float pixels = s.size * u.scale;
@@ -517,6 +602,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
     }
     out.leaf = 0.0;
     out.rain = 0.0;
+    out.dandelion = 0.0;
     return out;
 }
 
@@ -758,6 +844,11 @@ fragment float4 spriteFragment(SpriteOut in [[stage_in]], float2 coord [[point_c
         float4 water = rainAt(in, p);
         if (water.a < 0.002) discard_fragment();
         return water;
+    }
+    if (in.dandelion != 0.0) {
+        float4 seed = dandelionAt(p, in.dandelion, in.turn, in.alpha, in.light, in.warm);
+        if (seed.a < 0.002) discard_fragment();
+        return seed;
     }
     if (in.leaf != 0.0) {
         // The leaf over the exposure, from where it was to where it is now, turning and tumbling on the way.
