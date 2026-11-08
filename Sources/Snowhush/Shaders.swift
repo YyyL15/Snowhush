@@ -52,6 +52,8 @@ struct Sprite {
     float rain;
     float knife;
     float dandelion;
+    float firefly;
+    float glow;
 };
 
 struct SpriteOut {
@@ -89,6 +91,8 @@ struct SpriteOut {
     float blur;
     float knife;
     float dandelion;
+    float firefly;
+    float glow;
 };
 
 constant float3 candle = float3(1.0, 0.62, 0.26);
@@ -470,6 +474,28 @@ static float4 dandelionAt(float2 p, float seed, float lean, float alpha, float3 
     return color * alpha;
 }
 
+/// A firefly, `p` running across its glow from -0.5 to 0.5: a bright yellow-green speck of light in a soft halo that
+/// swells as it flashes, with the faint dark speck of its body showing when it is dim. The light adds to what is
+/// behind it, so it glows over a dark window and all but vanishes over a bright one, as a real one would. `pixels` is
+/// how wide the sprite is on the screen. Premultiplied.
+static float4 fireflyAt(float2 p, float seed, float glow, float alpha, float pixels) {
+    float r = length(p);
+    // From warm yellow to cool green, by its seed.
+    float3 tint = mix(float3(0.95, 1.0, 0.42), float3(0.62, 1.0, 0.36), fract(seed * 5.7));
+    // The speck stays two pixels or so across, however big the sprite.
+    float speck = 1.6 / max(pixels, 1.0);
+    float core = exp(-pow(r / speck, 2.0)) * (0.35 + 0.65 * glow);
+    float halo = exp(-pow(r / (0.12 + 0.1 * glow), 2.0)) * glow * 0.55 + exp(-pow(r / 0.35, 2.0)) * glow * glow * 0.18;
+    // Faded out before the sprite's square edge.
+    halo *= smoothstep(0.5, 0.3, r);
+    float light = (core + halo) * alpha;
+    float3 color = mix(tint, float3(1.0, 1.0, 0.85), saturate(core)) * light;
+    // Its body, a dark speck that shows over a bright window while it is dim.
+    float body = exp(-pow(r / (speck * 1.3), 2.0)) * 0.35 * (1.0 - glow) * alpha;
+    // Mostly added to what is behind: only a little coverage, so the light brightens rather than paints over.
+    return float4(color, saturate(light * 0.25 + body));
+}
+
 static float flicker(float time, float seed) {
     return 0.86 + 0.08 * sin(time * 11.0 + seed * 2.1) + 0.06 * sin(time * 29.0 + 1.3 + seed * 4.3);
 }
@@ -512,9 +538,20 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
                               const device Sprite *sprites [[buffer(0)]],
                               constant Uniforms &u [[buffer(1)]]) {
     Sprite s = sprites[vid];
+    if (s.firefly != 0.0) {
+        SpriteOut out = {};
+        out.position = float4((s.position + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
+        out.pointSize = max(s.size * u.scale, 4.0);
+        out.alpha = s.alpha;
+        out.size = s.size * u.scale;
+        out.firefly = s.firefly;
+        out.glow = s.glow;
+        out.light = u.light.rgb;
+        return out;
+    }
     if (s.dandelion != 0.0) {
         // A dandelion seed drifts too slowly to smear.
-        SpriteOut out;
+        SpriteOut out = {};
         out.position = float4((s.position + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
         out.pointSize = max(s.size * u.scale, 4.0);
         out.alpha = s.alpha;
@@ -531,7 +568,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
     if (s.knife != 0.0) {
         // A knife over a 1/160 s exposure, far shorter than a leaf's so its flat cartoon colours stay crisp: it smears along its
         // flight and, knocked loose, round its spin.
-        SpriteOut out;
+        SpriteOut out = {};
         float exposure = 0.006;
         float pixels = max(s.size * u.scale, 4.0);
         float2 travel = s.velocity * exposure;
@@ -557,7 +594,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         return out;
     }
     if (s.leaf != 0.0) {
-        SpriteOut out;
+        SpriteOut out = {};
         // About a 1/40 s exposure: at 30 frames a second a falling leaf smears most of the way to where the next
         // frame shows it, so it glides instead of hopping. The sprite sits midway along the smear.
         float exposure = 0.024;
@@ -585,11 +622,12 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.rain = 0.0;
         out.knife = 0.0;
         out.dandelion = 0.0;
+        out.firefly = 0.0;
         return out;
     }
     if (s.rain > 4.5) {
         // A piece of the film a running drop leaves behind: `velocity` from one end to the other, `size` wide.
-        SpriteOut out;
+        SpriteOut out = {};
         float pixels = max(s.size * u.scale, 1.0);
         float2 piece = s.velocity * u.scale;
         float extent = length(piece) + pixels + 2.0;
@@ -609,10 +647,11 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.blur = 0.0;
         out.knife = 0.0;
         out.dandelion = 0.0;
+        out.firefly = 0.0;
         return out;
     }
     if (s.rain != 0.0) {
-        SpriteOut out;
+        SpriteOut out = {};
         float pixels = max(s.size * u.scale, 1.5);
         // A raindrop in the air shows as the whole streak it draws over a 1/35 s exposure, the sprite at its head;
         // a drop on the glass draws out a tail behind it as it runs, and smears back along its path over a 1/40 s
@@ -656,6 +695,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
         out.turnSmear = s.turnSpeed;
         out.knife = 0.0;
         out.dandelion = 0.0;
+        out.firefly = 0.0;
         return out;
     }
     float pixels = s.size * u.scale;
@@ -666,7 +706,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
     // A lump's ragged edge reaches past its nominal size.
     float reach = s.lump > 0.0 ? 1.3 : 1.0;
     float extent = max(pixels * reach + length(streak), 2.0);
-    SpriteOut out;
+    SpriteOut out = {};
     out.position = float4((s.position + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
     out.pointSize = extent;
     out.streak = streak / extent;
@@ -697,6 +737,7 @@ vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
     out.rain = 0.0;
     out.knife = 0.0;
     out.dandelion = 0.0;
+    out.firefly = 0.0;
     return out;
 }
 
@@ -964,6 +1005,11 @@ fragment float4 spriteFragment(SpriteOut in [[stage_in]], float2 coord [[point_c
         float4 seed = dandelionAt(p, in.dandelion, in.turn, in.alpha, in.light, in.warm);
         if (seed.a < 0.002) discard_fragment();
         return seed;
+    }
+    if (in.firefly != 0.0) {
+        float4 light = fireflyAt(p, in.firefly, in.glow, in.alpha, in.size);
+        if (light.a < 0.001 && max(light.r, max(light.g, light.b)) < 0.002) discard_fragment();
+        return light;
     }
     if (in.leaf != 0.0) {
         // The leaf over the exposure, from where it was to where it is now, turning and tumbling on the way.

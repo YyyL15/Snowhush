@@ -5,6 +5,7 @@ import simd
 /// Desktop particle modes. Persisted values must remain stable.
 enum Mode: Int {
     case snow = 0, autumn = 1, rain = 2, blossom = 3, knives = 4, dandelion = 5
+    case fireflies = 6
 }
 
 struct Sprite {
@@ -57,6 +58,10 @@ struct Sprite {
     var knife: Float = 0
     /// A dandelion seed instead of snow: its seed, which varies its tuft; zero for snow. `turn` is how far it leans.
     var dandelion: Float = 0
+    /// A firefly instead of snow: its seed, which sets its glow's colour apart; zero for snow.
+    var firefly: Float = 0
+    /// For a firefly, how brightly it glows just now.
+    var glow: Float = 0
 }
 
 /// A Halloween sign a ghost holds up, or lets fall into the snow.
@@ -128,6 +133,15 @@ private struct Flake {
     /// A knife the cursor struck: it flies on the way it was hit, tip first along its arc, until it comes down.
     var thrown = false
     var dandelion: Float = 0
+    /// A firefly instead of a flake: its seed; zero for snow. It wanders `heading`, flashing every `period` seconds,
+    /// and fades in as it comes and out as it goes, by `presence`.
+    var firefly: Float = 0
+    var heading: Float = 0
+    var period: Float = 0
+    var age: Float = 0
+    var presence: Float = 0
+    /// How startled it is by the cursor coming near: it darts off and flashes.
+    var startle: Float = 0
 }
 
 /// A knife come down in a window's top edge, the Dock or the bottom of the screen: stuck in tip first, quivering a
@@ -501,6 +515,8 @@ final class SnowSimulation {
     private let seedShare: Float = 0.12
     private let maxResting = 300
     private var resting: [RestingSeed] = []
+    /// Fireflies are few: a scattering of lights rather than a snowfall.
+    private let fireflyShare: Float = 0.025
     private let maxSplashes = 1500
     private var splashes: [Splash] = []
     /// The share of raindrops hitting a window's top edge that run on down its face.
@@ -645,6 +661,7 @@ final class SnowSimulation {
     var rain: Bool { mode == .rain }
     var knives: Bool { mode == .knives }
     var dandelion: Bool { mode == .dandelion }
+    var fireflies: Bool { mode == .fireflies }
     private var restyled = false
     /// The mode waiting for the gust to clear the screen, so one kind never turns into the other in sight.
     private var nextMode: Mode?
@@ -831,6 +848,18 @@ final class SnowSimulation {
                     soft: 0,
                     turn: lean(of: flake),
                     dandelion: flake.dandelion
+                )
+                count += 1
+                continue
+            }
+            if flake.firefly != 0 {
+                buffer[count] = Sprite(
+                    position: flake.position,
+                    size: flake.size,
+                    alpha: flake.presence,
+                    soft: 0,
+                    firefly: flake.firefly,
+                    glow: brightness(of: flake)
                 )
                 count += 1
                 continue
@@ -1770,6 +1799,15 @@ final class SnowSimulation {
         var i = flakes.count - 1
         while i >= 0 {
             var flake = flakes[i]
+            if flake.firefly != 0 {
+                if wander(&flake, surplus: i >= targetFlakes || holding, wind: wind, dt: dt) {
+                    flakes[i] = flake
+                } else {
+                    removeFlake(i)
+                }
+                i -= 1
+                continue
+            }
             if flake.knife != 0 && flake.spin == 0 && !flake.thrown && flake.blown == 0, let push = strike(flake) {
                 flake.velocity = push
                 flake.thrown = true
@@ -2473,6 +2511,7 @@ final class SnowSimulation {
         if rain { return makeRaindrop(y: y) }
         if knives { return makeKnife(y: y) }
         if dandelion { return makeSeed(y: y) }
+        if fireflies { return makeFirefly() }
         let near = random.next() < 0.02
         let depth = near ? 1 : pow(random.next(), 1.6)
         let fallSpeed = near ? random.range(75, 100) : 16 + depth * 50 + random.range(0, 10)
@@ -2819,6 +2858,86 @@ final class SnowSimulation {
                 resting[k] = seed
             }
         }
+    }
+
+    // MARK: - Fireflies
+
+    /// A firefly appearing somewhere low over the screen, where the grass would be: it fades in rather than falling in
+    /// from the top.
+    private func makeFirefly() -> Flake {
+        let depth = random.next()
+        return Flake(
+            position: SIMD2(random.range(0, width), random.range(0.03, 0.5) * height),
+            velocity: .zero,
+            fallSpeed: 0,
+            size: 22 + depth * 14,
+            depth: depth,
+            alpha: 1,
+            soft: 0,
+            phase: random.range(0, phaseWrap),
+            swayRate: random.range(0.6, 1.2),
+            swayAmount: 0,
+            settles: false,
+            firefly: random.range(0.001, 1),
+            heading: random.range(0, 2 * .pi),
+            period: random.range(2.4, 5.5),
+            age: random.range(0, 5)
+        )
+    }
+
+    /// A firefly drifts on a slowly turning heading, kept low over the screen, nudged by the breeze; the cursor coming
+    /// near startles it off. One more than are wanted, or while a gust clears the screen, fades away. Returns whether
+    /// it is still there.
+    private func wander(_ flake: inout Flake, surplus: Bool, wind: Float, dt: Float) -> Bool {
+        flake.age += dt
+        flake.phase += flake.swayRate * dt
+        if flake.phase > phaseWrap { flake.phase -= phaseWrap }
+        let seed = flake.firefly
+        flake.heading += (sin(flake.phase * 1.3 + seed * 10) * 1.1 + 0.6 * sin(flake.phase * 0.37 + seed * 3)) * dt
+        // Kept low: turned back down when it rises too high, up when it sinks too near the bottom.
+        let top = height * 0.55
+        let bottom = height * 0.03
+        let up = SIMD2<Float>(cos(flake.heading), sin(flake.heading))
+        if flake.position.y > top && up.y > -0.3 { flake.heading -= 1.2 * dt * (up.x >= 0 ? 1 : -1) }
+        if flake.position.y < bottom && up.y < 0.3 { flake.heading += 1.2 * dt * (up.x >= 0 ? 1 : -1) }
+        let cruise = (14 + 18 * flake.depth) * (1 + 2.5 * flake.startle)
+        var target = SIMD2(cos(flake.heading), sin(flake.heading)) * cruise + SIMD2(wind * 0.5, 0)
+        if let cursor {
+            let away = flake.position - cursor
+            let distance = simd_length(away)
+            if distance < 90 && distance > 0.01 {
+                // Startled, it darts off away from the cursor and lights up.
+                flake.startle = min(1, flake.startle + dt * 4 * (1 - distance / 90))
+                flake.heading = atan2(away.y, away.x)
+                target = away / distance * cruise
+            }
+        }
+        flake.startle = max(0, flake.startle - dt * 0.6)
+        flake.velocity += (target - flake.velocity) * min(1, dt * 1.5)
+        if flake.blown != 0 { flake.velocity.x += (flake.blown * gustWind * 0.6 - flake.velocity.x) * min(1, dt * 2) }
+        flake.position += flake.velocity * dt
+        if flake.position.x < -30 { flake.position.x += width + 60 } else if flake.position.x > width + 30 { flake.position.x -= width + 60 }
+        flake.position.y = min(max(flake.position.y, 2), height * 0.7)
+
+        if surplus || flake.blown != 0 {
+            flake.presence -= dt / 1.5
+            return flake.presence > 0
+        }
+        flake.presence = min(1, flake.presence + dt / 2)
+        return true
+    }
+
+    /// How brightly a firefly glows just now: a soft ember between flashes, then a quick flash that dies away; some
+    /// flash twice in a row. Startled, it lights up.
+    private func brightness(of flake: Flake) -> Float {
+        let cycle = (flake.age / flake.period + flake.firefly * 7).truncatingRemainder(dividingBy: 1)
+        func flash(at start: Float) -> Float {
+            let t = cycle - start
+            guard t >= 0 else { return 0 }
+            return smoothstep(0, 0.05, t) * (1 - smoothstep(0.05, 0.3, t))
+        }
+        let pulse = max(flash(at: 0), flake.firefly > 0.6 ? flash(at: 0.12) * 0.8 : 0)
+        return min(1, max(0.12 + 0.88 * pulse, flake.startle))
     }
 
     // MARK: - Rain
@@ -3844,7 +3963,7 @@ final class SnowSimulation {
     }
 
     private func updateTarget() {
-        let share: Float = leafy ? leafShare : rain ? rainShare : knives ? knifeShare : dandelion ? seedShare : 1
+        let share: Float = leafy ? leafShare : rain ? rainShare : knives ? knifeShare : dandelion ? seedShare : fireflies ? fireflyShare : 1
         targetFlakes = snowfallHeld ? 0 : Int(snowfall.flakesPerMegapoint * share * strength * density * width * height / 1_000_000)
     }
 
