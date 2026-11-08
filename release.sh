@@ -10,6 +10,10 @@
 # Needs: a "Developer ID Application" identity, a notarytool keychain profile (NOTARY_PROFILE, default "snowhush"),
 # the Sparkle EdDSA key in the login keychain, gh signed in, and cargo-xwin for Windows.
 set -euo pipefail
+
+# The upstream publisher also pushes tags and a Homebrew tap.
+echo "Release publishing is disabled until the fork signing and release workflow is configured. See FORK.md." >&2
+exit 1
 cd "$(dirname "$0")"
 
 version=${1:?usage: ./release.sh <version> [notes]}

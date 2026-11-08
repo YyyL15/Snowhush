@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-flags=(-c release --arch arm64 --arch x86_64)
+flags=(-c release --arch arm64 --arch x86_64 "$@")
 swift build "${flags[@]}"
 products="$(swift build "${flags[@]}" --show-bin-path)"
 

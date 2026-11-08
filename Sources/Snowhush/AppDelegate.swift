@@ -68,7 +68,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
             return
         }
 
-        updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: self)
+        // Start Sparkle only after this distribution has its own feed and signing key.
+        if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil,
+           Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") != nil {
+            updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: self)
+        }
         statusItem = makeStatusItem()
         updateStatusIcon()
         refreshHalloween()
@@ -187,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
         loginItem = toggle("Open at Login", #selector(toggleOpenAtLogin), to: settings)
         let updates = settings.addItem(withTitle: "Check for Updates…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
         updates.target = updater
+        updates.isEnabled = updater != nil
         menu.addItem(withTitle: "Settings", action: nil, keyEquivalent: "").submenu = settings
         add("Support Snowhush…", #selector(openSponsors), to: menu)
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

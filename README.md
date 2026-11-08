@@ -1,3 +1,5 @@
+> This fork adds **Knife Storm, Dandelion, and Fireflies on macOS only**. Windows and Linux retain their existing modes. See [FORK.md](FORK.md) for distribution status.
+
 <p align="center">
   <img src="site/assets/icon-512.png" width="128" height="128" alt="Snowhush icon">
 </p>
