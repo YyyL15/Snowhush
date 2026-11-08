@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
     private var rainItem: NSMenuItem!
     private var blossomItem: NSMenuItem!
     private var knivesItem: NSMenuItem!
+    private var dandelionItem: NSMenuItem!
     private var maxPerformanceItem: NSMenuItem!
     private var behindWindowsItem: NSMenuItem!
     private var fullScreenItem: NSMenuItem!
@@ -155,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
         rainItem = add("Rain", #selector(chooseMode), to: modes)
         blossomItem = add("Cherry Blossom", #selector(chooseMode), to: modes)
         knivesItem = add("Knife Storm", #selector(chooseMode), to: modes)
+        dandelionItem = add("Dandelion", #selector(chooseMode), to: modes)
         modes.addItem(.separator())
         halloweenItem = add("Halloween", #selector(toggleHalloween), to: modes)
         menu.addItem(withTitle: "Mode", action: nil, keyEquivalent: "").submenu = modes
@@ -207,18 +209,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
         let rain = mode == .rain
         let blossom = mode == .blossom
         let knives = mode == .knives
+        let dandelion = mode == .dandelion
         snowItem.state = mode == .snow ? .on : .off
         autumnItem.state = autumn ? .on : .off
         rainItem.state = rain ? .on : .off
         blossomItem.state = blossom ? .on : .off
         knivesItem.state = knives ? .on : .off
-        // Rain and knives neither heap up nor lie about to clear away.
-        accumulateItem.isHidden = rain || knives
-        meltItem.isHidden = rain || knives
-        clearItem.isHidden = rain || knives
+        dandelionItem.state = dandelion ? .on : .off
+        // These modes do not accumulate snow.
+        accumulateItem.isHidden = rain || knives || dandelion
+        meltItem.isHidden = rain || knives || dandelion
+        clearItem.isHidden = rain || knives || dandelion
         meltItem.title = autumn ? "Wither Leaves" : blossom ? "Wilt Petals" : "Melt Snow"
         snowOnWindowsItem.title = autumn ? "Leaves on Windows" : blossom ? "Petals on Windows" : rain ? "Rain on Windows"
-            : knives ? "Knives on Windows" : "Snow on Windows"
+            : knives ? "Knives on Windows" : dandelion ? "Seeds on Windows" : "Snow on Windows"
         clearItem.title = autumn ? "Clear Leaves" : blossom ? "Clear Petals" : "Clear Snow"
         meltItem.state = thaws ? .on : .off
         meltItem.isEnabled = accumulates
@@ -310,7 +314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
 
     @objc private func chooseMode(_ sender: NSMenuItem) {
         let mode: Mode = sender === autumnItem ? .autumn : sender === rainItem ? .rain : sender === blossomItem ? .blossom
-            : sender === knivesItem ? .knives : .snow
+            : sender === knivesItem ? .knives : sender === dandelionItem ? .dandelion : .snow
         guard mode != Preferences.mode else { return }
         Preferences.mode = mode
         refreshHalloween()
@@ -337,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUSta
     private static let symbol: [Mode: String] = [.snow: "snowflake", .autumn: "leaf", .rain: "cloud.rain"]
 
     private static func icon(halloween: Bool, dimmed: Bool) -> NSImage? {
-        let image = halloween ? Halloween.icon : Preferences.mode == .blossom ? Blossom.icon : Preferences.mode == .knives ? Knives.icon
+        let image = halloween ? Halloween.icon : Preferences.mode == .blossom ? Blossom.icon : Preferences.mode == .knives ? Knives.icon : Preferences.mode == .dandelion ? Dandelion.icon
             : NSImage(systemSymbolName: Self.symbol[Preferences.mode] ?? "snowflake", accessibilityDescription: "Snowhush")
         guard dimmed, let image else { return image }
         // Dimmed by hand: the button's appearsDisabled also disables the slider in its menu, so Off could not be left.
